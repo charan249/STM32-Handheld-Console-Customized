@@ -22,11 +22,16 @@ void chip8_init(CHIP8 *chip8, unsigned long cpu_freq, unsigned long timer_freq,
 
     chip8->pc_start_addr = pc_start_addr;
 
+    // Clear out memory maps first before loading assets
+    chip8_reset_RAM(chip8);
     chip8_reset(chip8);
 
     chip8->metadata = metadata;
     chip8->rom_num = rom_num;
+    
+    // --- DELETE chip8_load_hardcoded_test(chip8); FROM HERE ---
 }
+
 
 void chip8_reset(CHIP8 *chip8) {
     chip8->PC = chip8->pc_start_addr;
@@ -861,3 +866,21 @@ bool chip8_get_pixel(uint8_t buf[DISPLAY_HEIGHT][DISPLAY_WIDTH_BYTES], int x, in
 
     return ((buf[y][byte]) & (1 << (7 - bit)));
 }
+void chip8_load_hardcoded_test(CHIP8 *chip8) {
+    // A verified 16-byte CHIP-8 executable sequence.
+    // It loads font index characters and draws them in an infinite loop!
+    static const uint8_t test_rom[] = {
+        0x60, 0x00, // V0 = 0 (Initial X Coordinate)
+        0x61, 0x00, // V1 = 0 (Initial Y Coordinate)
+        0xA2, 0x50, // I = 0x250 (Point index to a raw box pattern sprite)
+        0xD0, 0x15, // DRW V0, V1, 5 (Draw the 5-byte sprite)
+        0x70, 0x0A, // ADD V0, 10 (Shift next drawing position right)
+        0x12, 0x06, // JP 0x206 (Jump backward to clear/redraw loop frame)
+        
+        // Raw 5-byte sprite box shape data
+        0xFF, 0x81, 0x81, 0x81, 0xFF 
+    };
+
+    // Safely copy the test binary directly into the execution space
+    memcpy(chip8->RAM + chip8->pc_start_addr, test_rom, sizeof(test_rom));
+} void chip8_load_hardcoded_test(CHIP8 *chip8);

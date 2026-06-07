@@ -99,37 +99,50 @@ static const uint8_t *_char_to_bits(char c) {
 }
 
 static void _gpio_init(void) {
-    // Disable reset state
-    GPIOA_CRH &= ~(1 << 2);
-    GPIOB_CRH &= ~((1 << 18) | (1 << 22) | (1 << 26) | (1 << 30));
+    // FORCE PORT B PERIPHERAL CLOCK ON (Critical for bit-banging ODR)
+    *((volatile uint32_t *)0x40021018) |= (1 << 3); // Enables IOPBEN clock bit
+    
+    // 1. Clear configuration bits for the pins we are using
+    GPIOA_CRH &= ~(0xF << 0);
+    GPIOB_CRH &= ~(0xFFFF << 16);
 
-    // MODEy (A8, B12, B13, B14, B15 2MHz out)
-    GPIOA_CRH |= (1 << 1);
-    GPIOB_CRH |= ((1 << 17) | (1 << 21) | (1 << 25) | (1 << 29));
+    // 2. Set MODEy bits to 2MHz Output mode (0x2)
+    GPIOA_CRH |= (0x2 << 0);   // PA8 (A0 / DC)
+    GPIOB_CRH |= (0x2 << 16);  // PB12 (CS)     
+    GPIOB_CRH |= (0x2 << 20);  // PB13 (SCK)    
+    GPIOB_CRH |= (0x2 << 24);  // PB14 (RST)    
+    GPIOB_CRH |= (0x2 << 28);  // PB15 (SDA)    
 
-    // CNFy (B12, B13, B15 alt out, A8, B14 gpo)
-    GPIOB_CRH |= ((1 << 19) | (1 << 23) | (1 << 31));
+    // 3. Set CNFy bits 
+    // Leaving PB13, PB14, and PB15 at 0x0 makes them standard General Purpose Outputs
+    GPIOB_CRH |= (0x2 << 18);  // Only keep PB12 as an Alternate Function if needed
 }
 
 static void _spi_init(void) {
-    RCC_APB1ENR |= SPI_CLK;
-    for (volatile int i = 0; i < 10; i++)
-        ;
-
-    SPI2_CR1 |= (3 << 3);   // CLK / 16 (fastest speed that works)
-    SPI2_CR2 |= (1 << 2);   // Enable SS output
-    SPI2_CR1 |= (1 << 15);  // 1 line mode
-    SPI2_CR1 |= (1 << 14);  // Transmit-only
-    SPI2_CR1 |= (1 << 2);   // Set as master
-    SPI2_CR1 |= (1 << 6);   // Enable
+    // Intentionally left blank to bypass hardware SPI configuration
 }
 
 static void _display_write(uint8_t data) {
-    SPI2_DR = data;
-    while (!(SPI2_SR & 0x02))
-        ;
-    for (volatile int i = 0; i < 10; i++)
-        ;  // Need a very brief delay
+    // Software Bit-Banging loop (SPI Mode 0 compliant)
+    for (int i = 0; i < 8; i++) {
+        // 1. Set the Data pin (PB15) based on the highest bit (MSB)
+        if (data & 0x80) {
+            GPIOB_ODR |= (1 << 15);  // SDA HIGH
+        } else {
+            GPIOB_ODR &= ~(1 << 15); // SDA LOW
+        }
+
+        // 2. Pulse the Clock pin (PB13)
+        GPIOB_ODR &= ~(1 << 13); // SCK LOW (Idle state for Mode 0)
+        for (volatile int d = 0; d < 3; d++); // Brief setup delay
+        
+        GPIOB_ODR |= (1 << 13);  // SCK HIGH (OLED reads data bit here)
+        for (volatile int d = 0; d < 3; d++); // Brief hold delay
+        
+        data <<= 1; // Shift to the next bit
+    }
+    // Return clock to idle low state
+    GPIOB_ODR &= ~(1 << 13);
 }
 
 static void _display_putc(uint8_t x, uint8_t y, char c) {
@@ -144,22 +157,58 @@ static void _display_putc(uint8_t x, uint8_t y, char c) {
 void display_init(void) {
     _gpio_init();
 
-    // Perform hardware reset of display
+    // Hardware Reset the display
     GPIOB_ODR &= ~RST;
-    delay(5);
+    delay(50);             
     GPIOB_ODR |= RST;
-    delay(1);
+    delay(50);
 
     _spi_init();
 
-    // Voltage stuff
-    // Not entirely sure why this is needed
-    // Couldn't find much explanation in datasheet
-    display_send_cmd(0x28 | 0x7);
+    // --- Send SSD1306 OLED Startup Commands ---
+    display_send_cmd(0xAE); // Turn display off
+    display_send_cmd(0xD5); // Set Display Clock Divide Ratio
+    display_send_cmd(0x80); 
+    display_send_cmd(0xA8); // Set Multiplex Ratio
+    display_send_cmd(0x3F); // 1/64 duty cycle
+    display_send_cmd(0xD3); // Set Display Offset
+    display_send_cmd(0x00); // No offset
+    display_send_cmd(0x40); // Set Start Line to 0
+    display_send_cmd(0x8D); // Charge Pump Control
+    display_send_cmd(0x14); // ENABLE Internal Charge Pump (Crucial!)
+    display_send_cmd(0x20); // Set Memory Addressing Mode
+    display_send_cmd(0x02); // Page Addressing Mode
+    display_send_cmd(0xA1); // Segment Re-map (Flips horizontally)
+    display_send_cmd(0xC8); // COM Output Scan Direction (Flips vertically)
+    display_send_cmd(0xDA); // COM Pins Hardware Configuration
+    display_send_cmd(0x12);
+    display_send_cmd(0x81); // Set Contrast
+    display_send_cmd(0xCF); 
+    display_send_cmd(0xD9); // Set Pre-charge Period
+    display_send_cmd(0xF1);
+    display_send_cmd(0xDB); // Set VCOMH Deselect Level
+    display_send_cmd(0x40);
+    display_send_cmd(0xA4); // Entire Display On
+    display_send_cmd(0xA6); // Set Normal Display Mode
 
-    // Zero out display RAM and turn on
-    display_clear();
-    display_send_cmd(DISPLAY_ON);
+    display_clear();        // Wipes black frame buffer memory
+    display_send_cmd(0xAF); // Turn display ON
+
+    // --- DIAGNOSTIC HARDWARE TEST LOCK ---
+    // This fills screen pixels with 0xFF (solid color)
+   // display_test(); 
+
+    // Enable clock for GPIOC (PC13 status LED)
+   // *((volatile uint32_t *)0x40021018) |= (1 << 4); 
+    // Configure PC13 as standard 2MHz Output
+   // *((volatile uint32_t *)0x40011004) &= ~(0xF << 20); 
+   // *((volatile uint32_t *)0x40011004) |= (0x2 << 20);  
+
+    // Trap execution here to blink PC13 indefinitely for validation
+   // while (1) {
+     //   *((volatile uint32_t *)0x4001100C) ^= (1 << 13); 
+   // delay(500); 
+    //}
 }
 
 void display_send_data(uint8_t data) {
@@ -175,8 +224,8 @@ void display_send_cmd(uint8_t cmd) {
 void display_clear(void) {
     for (int y = 0; y < NUM_PAGES; y++) {
         display_send_cmd(SET_PAGE_ADDR | y);
+        display_send_cmd(0x02); // Lower Column Address offset for SH1106 compatibility
         display_send_cmd(SET_COL_ADDR_MSB);
-        display_send_cmd(SET_COL_ADDR_LSB);
 
         for (int x = 0; x < NUM_COLS; x++) {
             display_send_data(0x00);
@@ -218,12 +267,11 @@ void display_print(uint8_t x, uint8_t y, const char *str) {
 void display_test(void) {
     for (int y = 0; y < NUM_PAGES; y++) {
         display_send_cmd(SET_PAGE_ADDR | y);
+        display_send_cmd(0x02); // Lower Column Address offset for SH1106 compatibility
         display_send_cmd(SET_COL_ADDR_MSB);
-        display_send_cmd(SET_COL_ADDR_LSB);
 
         for (int x = 0; x < NUM_COLS; x++) {
             display_send_data(0xFF);
-            delay(50);
         }
     }
 }

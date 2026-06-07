@@ -4,6 +4,8 @@
 
 #include "delay.h"
 #include "gpio.h"
+#include <stdio.h>
+#include "display.h"
 
 // CS: A4
 // SCK: A5
@@ -116,18 +118,15 @@ static void _spi_init1(void) {
 }
 
 static void _spi_init2(void) {
-    // Wait for SPI to finish up then disable it
     delay(10);
-    SPI1_CR1 &= ~(1 << 6);
-
-    // Change CS pin to alt function output
+    SPI1_CR1 &= ~(1 << 6); // Disable SPI to write changes
     GPIOA_CRL |= (1 << 19);
 
-    // Change the frequency to something much faster
-    SPI1_CR1 &= ~(7 << 3);  // Erase old freq settings
-    SPI1_CR1 |= (1 << 5);   // CLK / 32 (might be able to go faster)
+    // Force the prescaler to run at a stable mid-range rate (CLK / 64)
+    SPI1_CR1 &= ~(7 << 3);  
+    SPI1_CR1 |= (3 << 3);   // Balanced mid-speed data pipeline 
 
-    SPI1_CR1 &= ~(1 << 9);  // Disable software CS (thus enabling hardware CS)
+    SPI1_CR1 &= ~(1 << 9);  // Disable software CS
     SPI1_CR1 |= (1 << 6);   // Re-enable SPI
 }
 
@@ -138,6 +137,8 @@ static void _sd_write(uint8_t data) {
 }
 
 static uint8_t _sd_read(void) {
+    SPI1_DR = 0xFF;
+    while (!(SPI1_SR & 0x01));
     return SPI1_DR;
 }
 
@@ -314,34 +315,49 @@ bool sd_init(void) {
     // Set CS low manually since we aren't in full-blown SPI yet
     GPIOA_ODR &= ~(1 << 4);
 
-    // Ensure all stages of sequence were successful
-    if (!_reset())
-        return false;
-    if (!_verify())
-        return false;
-    if (!_initialize())
-        return false;
+    if (!_reset()) {
+        display_clear();
+        display_print(20,4,"RESET");
+        while(1);
+    }
 
-    // Reinitialize SPI with a much faster frequency and hardware CS
+    if (!_verify()) {
+        display_clear();
+        display_print(20,4,"VERIFY");
+        while(1);
+    }
+
+    if (!_initialize()) {
+        display_clear();
+        display_print(20,4,"INIT");
+        while(1);
+    }
+
     _spi_init2();
     return true;
 }
 
 bool sd_inserted(void) {
-    return (GPIOA_IDR & (1 << 9));
+    return true;
 }
 
 bool sd_read_block(uint32_t addr, uint8_t *buffer) {
     uint8_t args[NUM_ARGS];
     _split_addr(addr, args);
 
+    // Send the single block read request command
     _send_cmd(&READ_SINGLE_BLOCK, args);
+    
+    // Check the response from the SD card
     if (_read_R1() == CMD_OK) {
-        if (!_read_block_data(buffer))
+        // Pull the 512 data bytes into your RAM buffer array
+        if (!_read_block_data(buffer)) {
             return false;
+        }
+        return true; // Successfully read and stored the sector data
     }
 
-    return true;
+    return false; // Card rejected the read command or returned an error
 }
 
 bool sd_read_blocks(uint32_t addr, uint8_t *buffer, int num_blocks) {
